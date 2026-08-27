@@ -1,0 +1,10 @@
+_workdir/
+_output/
+_input/
+noble-ml-core/
+__pycache__/
+.pytest_cache/
+*.pyc
+parity_plot.png
+experiment_config.yaml
+formulation_training_ready.pkl

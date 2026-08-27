@@ -1,0 +1,68 @@
+# Baseline local formulation experiment.
+# Run prepare_formulation_data first to create formulation_training_ready.csv.
+
+data:
+  dataloader:
+    _target_: noble_ml_core.data.formulation_dataloader.LocalFormulationDataLoader
+  config:
+    _target_: noble_ml_core.data.formulation_dataloader.LocalFormulationDataLoaderHyperparameterSet
+    file_path: formulation_training_ready.csv
+    component_file_path: null
+    id_column: IDs
+    proportions_column: Proportions
+    input_columns: [IDs, Proportions, T]
+    target_columns: [logV]
+    problem_type: regression
+    split_method: train_test_val
+    test_size: 0.2
+    random_state: 42
+
+preprocessing_pipeline:
+  _target_: noble_ml_core.processors.processor_pipelines.SequentialProcessorPipeline
+  processors:
+    - _target_: noble_ml_core.processors.formulation_processors.FormulationProcessor
+      config:
+        _target_: noble_ml_core.processors.formulation_processors.FormulationProcessorHyperparameterSet
+        keep_original_columns: true
+        component_pipeline:
+          _target_: noble_ml_core.processors.processor_pipelines.SequentialProcessorPipeline
+          processors:
+            - _target_: noble_ml_core.processors.basic_processors.OneHotEncoderProcessor
+              config:
+                _target_: noble_ml_core.processors.basic_processors.OneHotEncoderProcessorHyperparameterSet
+                input_columns: [IDs]
+        aggregation_function:
+          _target_: noble_ml_core.processors.aggregators.MeanAggregationFunction
+          mean_type: arithmetic
+        formulation_column: IDs
+        quantity_column: Proportions
+        input_columns: [IDs, Proportions]
+    - _target_: noble_ml_core.processors.feature_selection.FeatureSelectorProcessor
+      config:
+        _target_: noble_ml_core.processors.feature_selection.FeatureSelectorProcessorHyperparameterSet
+        dropped_columns: [IDs, Proportions]
+    - _target_: noble_ml_core.processors.basic_processors.ScalerProcessor
+      config:
+        _target_: noble_ml_core.processors.basic_processors.ScalerProcessorHyperparameterSet
+        scaler_type: standard
+
+postprocessing_pipeline:
+  _target_: noble_ml_core.processors.processor_pipelines.InvertibleSequentialProcessorPipeline
+  processors:
+    - _target_: noble_ml_core.processors.basic_processors.ScalerProcessor
+      config:
+        _target_: noble_ml_core.processors.basic_processors.ScalerProcessorHyperparameterSet
+        scaler_type: standard
+
+model:
+  _target_: noble_ml_core.models.xgb_model.XGBModel
+  config:
+    _target_: noble_ml_core.models.xgb_model.XGBModelHyperparameterSet
+    problem_type: regression
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    random_state: 42
+
+artifact_logging:
+  artifact_logger_type: NOOP

@@ -1,0 +1,134 @@
+# Multi-architecture formulation sweep based on noble-ml-core examples:
+# - examples/configs/formulation-sweep-base.yaml
+# - examples/configs/hyperparameter-example.yaml
+#
+# Run prepare_formulation_data with a component database before this config.
+# It writes formulation_training_ready.csv and ml_core_component_database.csv.
+
+data:
+  dataloader:
+    _target_: noble_ml_core.data.formulation_dataloader.LocalFormulationDataLoader
+  config:
+    _target_: noble_ml_core.data.formulation_dataloader.LocalFormulationDataLoaderHyperparameterSet
+    file_path: formulation_training_ready.csv
+    component_file_path: ml_core_component_database.csv
+    id_column: IDs
+    proportions_column: Proportions
+    input_columns: [IDs, Proportions, T]
+    target_columns: [logV]
+    problem_type: regression
+    split_method: train_test_val
+    test_size: 0.2
+    random_state: 42
+
+preprocessing_pipeline:
+  _target_: noble_ml_core.processors.processor_pipelines.SequentialProcessorPipeline
+  processors:
+    - _target_: noble_ml_core.processors.formulation_processors.FormulationProcessor
+      config:
+        _target_: noble_ml_core.processors.formulation_processors.FormulationProcessorHyperparameterSet
+        keep_original_columns: true
+        component_pipeline:
+          _target_: noble_ml_core.processors.processor_pipelines.SequentialProcessorPipeline
+          processors:
+            - _target_: noble_ml_core.processors.feature_selection.FeatureSelectorProcessor
+              config:
+                _target_: noble_ml_core.processors.feature_selection.FeatureSelectorProcessorHyperparameterSet
+                selected_columns: [SMILES]
+            - _class_options:
+                search_space: choice
+                categories: [RDKitFeaturizer, MordredFeaturizer]
+              config:
+                _target_: noble_ml_core.featurizers.chemical_featurizers.SMILESFeaturizerHyperparameterSet
+                smiles_column: SMILES
+        aggregation_function:
+          _target_: noble_ml_core.processors.aggregators.MeanAggregationFunction
+          mean_type: arithmetic
+        formulation_column: IDs
+        quantity_column: Proportions
+        input_columns: [IDs, Proportions]
+    - _target_: noble_ml_core.processors.feature_selection.FeatureSelectorProcessor
+      config:
+        _target_: noble_ml_core.processors.feature_selection.FeatureSelectorProcessorHyperparameterSet
+        dropped_columns: [IDs, Proportions]
+    - _target_: noble_ml_core.processors.basic_processors.ScalerProcessor
+      config:
+        _target_: noble_ml_core.processors.basic_processors.ScalerProcessorHyperparameterSet
+        scaler_type:
+          search_space: choice
+          categories: [standard, quantile]
+
+postprocessing_pipeline:
+  _target_: noble_ml_core.processors.processor_pipelines.InvertibleSequentialProcessorPipeline
+  processors:
+    - _target_: noble_ml_core.processors.basic_processors.ScalerProcessor
+      config:
+        _target_: noble_ml_core.processors.basic_processors.ScalerProcessorHyperparameterSet
+        scaler_type: standard
+
+# For an architecture sweep, replace _target_ with _class_options. The config
+# contains the union of fields used by the candidate model classes; noble-ml-core
+# conditionally retains only fields supported by the sampled class.
+model:
+  _class_options:
+    search_space: choice
+    categories: [XGBModel, FCNModel, TabICLModel, PNNModel]
+  config:
+    problem_type: regression
+    alpha:
+      search_space: loguniform
+      lower: 0.001
+      upper: 10.0
+    l1_ratio:
+      search_space: uniform
+      lower: 0.0
+      upper: 1.0
+    n_estimators:
+      search_space: choice
+      categories: [8, 50, 100, 200]
+    max_depth:
+      search_space: randint
+      lower: 3
+      upper: 10
+    learning_rate:
+      search_space: loguniform
+      lower: 0.01
+      upper: 0.3
+    width:
+      search_space: randint
+      lower: 10
+      upper: 100
+    num_hidden_layers:
+      search_space: randint
+      lower: 1
+      upper: 4
+    dropout:
+      search_space: uniform
+      lower: 0.0
+      upper: 0.5
+    batch_norm:
+      search_space: choice
+      categories: [True, False]
+    homo_noise:
+      search_space: choice
+      categories: [True, False]
+
+tune:
+  resources_per_trial: ${oc.decode:"{cpu:1, gpu:0}"}
+  mode: max
+  metric: score
+  tune_config:
+    _target_: ray.tune.TuneConfig
+    num_samples: 10
+    reuse_actors: true
+    max_concurrent_trials: 1
+    search_alg:
+      _target_: ray.tune.search.optuna.OptunaSearch
+      sampler:
+        _target_: optuna.samplers.TPESampler
+        seed: 42
+      metric: ${tune.metric}
+      mode: ${tune.mode}
+
+artifact_logging:
+  artifact_logger_type: ${artifactlogger:LOCAL}

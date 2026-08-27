@@ -1,0 +1,186 @@
+name: mlCore
+description: >
+  NobleAI ML Core tool for chemical formulation property prediction. The coding
+  environment inspects data and authors Hydra YAML. actions only execute that
+  config via noble-ml-core (run_experiment, hyperparameter sweep, retrain-best,
+  predict). Supports registry models (XGBoost, Linear, TabPFN, FCN, GP, etc.)
+  and featurizers (OneHot, RDKit, Mordred, Morgan, ChemBERTa).
+version: 0.4.0
+category: Machine Learning
+license: Proprietary
+
+infra:
+  - name: worker
+    infra_type: container
+    image:
+      acr: "nobleaidiscoveryademoacr.azurecr.io/ml-core:latest"
+    compute:
+      min_resources:
+        cpu: 2
+        ram: "8Gi"
+        gpu: 0
+        storage: "8Gi"
+      max_resources:
+        cpu: 8
+        ram: "64Gi"
+        gpu: 0
+        storage: "32Gi"
+      infiniband: false
+      recommended_sku:
+        - Standard_D4s_v6
+        - Standard_D8s_v6
+      pool_type: static
+      pool_size: 1
+
+actions:
+  - name: run_experiment
+    description: >
+      Run noble-ml-core training from an authored Hydra experiment_config.yaml.
+      config_path is required. Mount the coding-environment output (YAML + data
+      files) as input_directory. Writes metrics, plots, and optional LOCAL artifacts.
+    infra_node: worker
+    input_schema:
+      type: object
+      properties:
+        input_directory:
+          type: string
+          description: Directory with experiment_config.yaml and prepared data files.
+        output_directory:
+          type: string
+        config_path:
+          type: string
+          description: Path to experiment_config.yaml authored in the coding environment.
+        save_artifacts:
+          type: string
+          description: If true (default), persist model artifacts for predict.
+        generate_plots:
+          type: string
+      required:
+        - input_directory
+        - output_directory
+        - config_path
+    command: >
+      python3 /app/entrypoint.py --action run_experiment
+      --input {{input_directory}} --output {{output_directory}}
+      --config-path {{config_path}}
+      {{#if save_artifacts}}--save-artifacts {{save_artifacts}}{{/if}}
+      {{#if generate_plots}}--generate-plots {{generate_plots}}{{/if}}
+
+  - name: run_hyperparameter_sweep
+    description: >
+      Ray Tune sweep (noble-ml-core run_sweep) from an authored sweep_config.yaml
+      that already includes a tune block. config_path is required. Writes
+      sweep/best_config.yaml. Expensive — use after a weak baseline, then call
+      train_best_from_sweep.
+    infra_node: worker
+    input_schema:
+      type: object
+      properties:
+        input_directory:
+          type: string
+          description: Directory with sweep_config.yaml and prepared data files.
+        output_directory:
+          type: string
+        config_path:
+          type: string
+          description: Path to sweep_config.yaml (must include a tune block).
+      required:
+        - input_directory
+        - output_directory
+        - config_path
+    command: >
+      python3 /app/entrypoint.py --action run_hyperparameter_sweep
+      --input {{input_directory}} --output {{output_directory}}
+      --config-path {{config_path}}
+
+  - name: train_best_from_sweep
+    description: >
+      Retrain using sweep/best_config.yaml with LOCAL artifact logging. Call after
+      run_hyperparameter_sweep. Mount the sweep output directory as input_directory
+      or pass sweep_directory.
+    infra_node: worker
+    input_schema:
+      type: object
+      properties:
+        input_directory:
+          type: string
+          description: Sweep directory containing best_config.yaml (or parent).
+        output_directory:
+          type: string
+        sweep_directory:
+          type: string
+          description: Explicit path to sweep dir if different from input_directory.
+        save_artifacts:
+          type: string
+        generate_plots:
+          type: string
+      required:
+        - input_directory
+        - output_directory
+    command: >
+      python3 /app/entrypoint.py --action train_best_from_sweep
+      --input {{input_directory}} --output {{output_directory}}
+      {{#if sweep_directory}}--sweep-directory {{sweep_directory}}{{/if}}
+      {{#if save_artifacts}}--save-artifacts {{save_artifacts}}{{/if}}
+      {{#if generate_plots}}--generate-plots {{generate_plots}}{{/if}}
+
+  - name: predict
+    description: >
+      Load LOCAL ensemble artifacts from a prior run_experiment / train_best_from_sweep
+      and predict on new formulation rows. Writes predictions.csv.
+    infra_node: worker
+    input_schema:
+      type: object
+      properties:
+        input_directory:
+          type: string
+          description: Directory containing the formulation CSV to score.
+        output_directory:
+          type: string
+        artifact_directory:
+          type: string
+          description: Path to saved model artifacts (…/artifacts/default).
+        formulation_path:
+          type: string
+          description: Path to the formulation CSV (absolute or relative to input_directory).
+        component_db_path:
+          type: string
+          description: >
+            Optional path to a component database CSV. Needed when the trained
+            pipeline uses FormulationProcessor with a component table (e.g. SMILES).
+            Omit for ID-only models.
+      required:
+        - input_directory
+        - output_directory
+        - artifact_directory
+        - formulation_path
+    command: >
+      python3 /app/entrypoint.py --action predict
+      --input {{input_directory}} --output {{output_directory}}
+      --artifact-directory {{artifact_directory}}
+      --formulation-path {{formulation_path}}
+      {{#if component_db_path}}--component-db-path {{component_db_path}}{{/if}}
+
+code_environments:
+  - language: python3
+    command: "python3 -u \"/{{scriptName}}\" > {{output_directory}}/logs.out 2>&1; cp -r /workdir/* {{output_directory}}/ 2>/dev/null || true; tail -n 100 {{output_directory}}/logs.out"
+    description: |
+      Python code environment with noble-ml-core and ml_core_utils for inspecting
+      formulation data and authoring Hydra YAML. Do NOT train here.
+
+      Use this environment only to:
+      - Load and profile CSVs (prepare_formulation_data with explicit formulation_path
+        / component_db_path, assess_model_readiness)
+      - List registry components (list_models, list_preprocessors, list_postprocessors,
+        get_component_config, build_component_config)
+      - Inspect registered data splits (list_split_methods,
+        list_split_method_config_parameters)
+      - Build the standard data block (build_formulation_data_config: local by default,
+        loader_type="vip" for VIP normalization)
+      - Assemble, validate, and save experiment_config.yaml or sweep_config.yaml
+      - Call save_final_results() and quick_finish()
+
+      Never import or call run_experiment, run_sweep, or train_pipeline.
+      Write data files and YAML to /workdir using basenames for file_path
+      (e.g. formulation_training_ready.csv). Training is a later tool action.
+    infra_node: worker

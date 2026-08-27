@@ -1,0 +1,32 @@
+name: formulation-modeling-agent
+type: agent
+party: 3p
+version: 0.3.0
+associated_tools:
+  - agents/formulation-modeling-agent/tools/ml-core
+
+publisher:
+  name: NobleAI
+  contact: support@noble.ai
+  support_url: https://github.com/nobleai/discovery-catalog/issues
+  partner_link: https://github.com/nobleai/formulation-modeling-agent
+
+description: >
+  Expert agent for creating chemical formulation property prediction models from experimental data
+  using NobleAI noble-ml-core. The coding environment inspects data and authors Hydra YAML;
+  tool actions run_experiment, hyperparameter sweeps, retrain-best, and predict from that config.
+
+tags:
+  - chemistry
+  - formulation
+  - molecular-properties
+  - property-prediction
+  - machine-learning
+
+supported_regions:
+  - eastus
+  - swedencentral
+  - uksouth
+
+compliance:
+  soc2: false

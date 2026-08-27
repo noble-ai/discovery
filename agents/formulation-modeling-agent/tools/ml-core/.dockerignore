@@ -1,0 +1,19 @@
+.python-version
+**/*.egg-info
+**/__pycache__/
+**/.ipynb_checkpoints/
+**/wandb/
+.env
+**/artifacts/
+**/*.xlsx
+**/*.csv
+**/local/
+**/*.json
+# Allow .docker_model_artifacts directory and all its contents (including JSON files)
+!.docker_model_artifacts/
+!.docker_model_artifacts/**
+**/notebooks/
+**/cache/
+examples/
+**/cache/
+**/.venv/
