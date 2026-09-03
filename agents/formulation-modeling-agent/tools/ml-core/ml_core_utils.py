@@ -37,9 +37,13 @@ import numpy as np
 import pandas as pd
 from omegaconf import DictConfig, OmegaConf
 
-INPUT_DIR = "/input"
+# User-uploaded formulation + component CSVs are mounted here in Discovery.
+DATA_MOUNT = "/inputs"
+INPUT_DIR = "/inputs"
 OUTPUT_DIR = "/output"
 WORK_DIR = "/workdir"
+
+_HOST_PATH_PREFIXES = ("/Users/", "/home/")
 
 # Column defaults match noble-ml-core formulation dataloaders (not Discovery-only).
 _FORMULATION_DEFAULTS = LocalFormulationDataLoaderHyperparameterSet()
@@ -193,7 +197,7 @@ def get_component_hydra_target(
     component_name: str, component_type: str
 ) -> Dict[str, Any]:
     """Return the minimal Hydra block for a registered model or processor."""
-    registry = _resolve_registry(component_type, component_name)
+    registry = _resolve_registry(component_type)
     if not registry.is_registered(component_name):
         raise ValueError(
             f"Component {component_name!r} is not registered as {component_type}."
@@ -233,25 +237,28 @@ def build_formulation_data_config(
     test_size: float = 0.2,
     random_state: int = 42,
     loader_type: str = "local",
-    use_basenames: bool = True,
+    use_basenames: bool = False,
     **config_overrides: Any,
 ) -> Dict[str, Any]:
     """Build the standard noble-ml-core formulation ``data`` config block.
 
     Args:
         formulation_file: Formulation table path (mapped to ``file_path``).
+            Prefer the mounted Discovery path, e.g. ``/inputs/<file>.csv``.
         target_columns: Columns to model.
-        component_file_path: Optional component table path.
+        component_file_path: Optional component table path (``/inputs/<file>.csv``).
         id_column: Column containing component identifier lists.
         proportions_column: Column containing component proportion lists.
         input_columns: Model inputs. Defaults to ID and proportion columns.
+            Include categorical covariates; they are one-hot encoded later.
         problem_type: Noble-ml-core problem type.
         split_method: Data splitting strategy.
         test_size: Holdout fraction.
         random_state: Split seed.
         loader_type: ``"local"`` or ``"vip"``. VIP additionally supports wide
             formulation CSVs and VIP component-table normalization.
-        use_basenames: Store only path basenames for Discovery remounting.
+        use_basenames: If True, store only path basenames. Default False so
+            authored YAML keeps ``/inputs/<file>.csv`` after remounting.
         **config_overrides: Additional fields accepted by the selected
             dataloader hyperparameter set (for example ``num_folds`` or
             ``vip_id_column``).
@@ -342,6 +349,25 @@ _REQUIRED_EXPERIMENT_KEYS = (
     "model",    
 )
 
+_DATA_PATH_KEYS = ("file_path", "component_file_path")
+
+
+def _is_host_path(path: str) -> bool:
+    """Return True for laptop/host paths that will not exist in the container."""
+    text = str(path).strip().replace("\\", "/")
+    if text.startswith("~"):
+        return True
+    if len(text) >= 2 and text[1] == ":" and text[0].isalpha():
+        return True
+    return any(text.startswith(prefix) for prefix in _HOST_PATH_PREFIXES)
+
+
+def _config_has_formulation_processor(cfg: Any) -> bool:
+    processors = OmegaConf.select(cfg, "preprocessing_pipeline.processors")
+    if not processors:
+        return False
+    return "FormulationProcessor" in OmegaConf.to_yaml(processors)
+
 
 def create_config_from_yaml_string(yaml_string: str) -> DictConfig:
     return OmegaConf.create(yaml_string)
@@ -369,6 +395,7 @@ def validate_experiment_config(
         cfg = OmegaConf.create(cfg)
 
     errors: List[str] = []
+    warnings: List[str] = []
     missing = [key for key in _REQUIRED_EXPERIMENT_KEYS if key not in cfg]
     if missing:
         errors.append(f"Missing required keys: {missing}")
@@ -384,6 +411,21 @@ def validate_experiment_config(
     else:
         if OmegaConf.select(data_config, "file_path") in (None, ""):
             errors.append("data.config.file_path is required")
+        for key in _DATA_PATH_KEYS:
+            value = OmegaConf.select(data_config, key)
+            if not value:
+                continue
+            path_str = str(value)
+            if _is_host_path(path_str):
+                errors.append(
+                    f"data.config.{key} {path_str!r} looks like a host path. "
+                    f"Use the mounted {DATA_MOUNT}/<file>.csv path."
+                )
+            elif os.path.basename(path_str) == path_str:
+                warnings.append(
+                    f"data.config.{key} {path_str!r} is a basename; prefer "
+                    f"{DATA_MOUNT}/{path_str}."
+                )
         target_columns = OmegaConf.select(data_config, "target_columns")
         if not target_columns:
             errors.append("data.config.target_columns must not be empty")
@@ -394,9 +436,16 @@ def validate_experiment_config(
                 f"{SPLIT_METHOD_REGISTRY.list_callables()}"
             )
 
+    if "preprocessing_pipeline" in cfg and not _config_has_formulation_processor(cfg):
+        errors.append(
+            "preprocessing_pipeline must include FormulationProcessor "
+            "(with a nested component_pipeline)."
+        )
+
     return {
         "ok": not errors,
         "errors": errors,
+        "warnings": warnings,
         "has_tune": has_tune,
     }
 
@@ -482,7 +531,7 @@ def build_component_config(component_name: str, component_type: str, component_c
         },
     }
 
-def quick_setup(input_dir="/input", output_dir="/output", work_dir="/workdir"):
+def quick_setup(input_dir="/inputs", output_dir="/output", work_dir="/workdir"):
     """Initialize logging, create directories, and copy input files."""
     global INPUT_DIR, OUTPUT_DIR, WORK_DIR
     INPUT_DIR = os.path.abspath(input_dir)
@@ -605,8 +654,10 @@ def _resolve_input_path(path: str) -> str:
 
     basename = os.path.basename(path)
     for candidate in (
+        os.path.join(DATA_MOUNT, basename),
         os.path.join(WORK_DIR, basename),
         os.path.join(INPUT_DIR, basename),
+        os.path.join(DATA_MOUNT, path),
         os.path.join(WORK_DIR, path),
         os.path.join(INPUT_DIR, path),
     ):
@@ -623,9 +674,11 @@ def _resolve_data_path(path: str, input_directory: Optional[str] = None) -> str:
     candidates = []
     if os.path.isabs(path):
         candidates.append(path)
+    basename = os.path.basename(path)
+    candidates.append(os.path.join(DATA_MOUNT, basename))
     if input_directory:
         candidates.append(os.path.join(input_directory, path))
-        candidates.append(os.path.join(input_directory, os.path.basename(path)))
+        candidates.append(os.path.join(input_directory, basename))
     candidates.append(_resolve_input_path(path))
     seen = set()
     for candidate in candidates:
@@ -636,32 +689,30 @@ def _resolve_data_path(path: str, input_directory: Optional[str] = None) -> str:
             return os.path.abspath(candidate)
     raise FileNotFoundError(
         f"File not found: {path}. Pass an explicit path (absolute or relative "
-        "to the input directory)."
+        f"to {DATA_MOUNT} or the input directory)."
     )
 
 
-_DATA_PATH_KEYS = ("file_path", "component_file_path")
-
-
 def _rebase_path(path_str: str, input_dir: str) -> str:
-    """Resolve a config file path after Discovery remounts prior /output as /input."""
+    """Resolve a config data path, preferring the mounted ``/inputs`` CSVs."""
     if not path_str:
         return path_str
     basename = os.path.basename(str(path_str))
-    for candidate in (
+    candidates = [
+        os.path.join(DATA_MOUNT, basename),
         os.path.join(input_dir, basename),
         os.path.join(input_dir, str(path_str)),
         os.path.join(INPUT_DIR, basename),
         os.path.join(WORK_DIR, basename),
-    ):
-        if os.path.isfile(candidate):
+        str(path_str),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
             return os.path.abspath(candidate)
-    if os.path.isfile(path_str):
-        return os.path.abspath(path_str)
     raise FileNotFoundError(
         f"Could not resolve data file {path_str!r} after remounting. "
-        f"Searched input directory {input_dir!r}, INPUT_DIR {INPUT_DIR!r}, "
-        f"and WORK_DIR {WORK_DIR!r}."
+        f"Searched {DATA_MOUNT!r}, input directory {input_dir!r}, "
+        f"INPUT_DIR {INPUT_DIR!r}, and WORK_DIR {WORK_DIR!r}."
     )
 
 
@@ -819,6 +870,14 @@ def align_component_database(
     return out
 
 
+def _is_categorical_series(series: pd.Series) -> bool:
+    return bool(
+        isinstance(series.dtype, pd.CategoricalDtype)
+        or pd.api.types.is_object_dtype(series)
+        or pd.api.types.is_string_dtype(series)
+    )
+
+
 def assess_model_readiness(
     df: pd.DataFrame,
     component_db: Optional[pd.DataFrame] = None,
@@ -834,12 +893,20 @@ def assess_model_readiness(
         for col in df.columns
         if col not in excluded and pd.api.types.is_numeric_dtype(df[col])
     ]
+    targets_inferred = candidate_targets is None
     if candidate_targets is None:
         candidate_targets = list(numeric_cols)
     else:
         candidate_targets = [c for c in candidate_targets if c in df.columns]
 
     covariates = [c for c in numeric_cols if c not in candidate_targets]
+    categorical_covariates = [
+        col
+        for col in df.columns
+        if col not in excluded
+        and col not in candidate_targets
+        and _is_categorical_series(df[col])
+    ]
     profile = profile_dataset(df, target_columns=candidate_targets or None)
 
     warnings: List[str] = []
@@ -885,9 +952,24 @@ def assess_model_readiness(
         "Choose model and processors from list_models(), list_preprocessors(), "
         "and get_component_config() given this data profile."
     )
-    if len(candidate_targets) > 1:
+    if targets_inferred and len(candidate_targets) > 1:
         next_actions.append(
-            "Multiple target candidates found; confirm the target column with the user."
+            "Multiple numeric columns found; pass the user-specified target_columns "
+            "rather than treating every numeric column as a target."
+        )
+    if categorical_covariates:
+        next_actions.append(
+            "One-hot encode categorical columns with OneHotEncoderProcessor: "
+            f"{categorical_covariates}."
+        )
+        next_actions.append(
+            "Drop unused columns with FeatureSelectorProcessor "
+            "(dropped_columns or selected_columns)."
+        )
+    elif covariates or has_smiles:
+        next_actions.append(
+            "Drop unused columns with FeatureSelectorProcessor "
+            "(dropped_columns or selected_columns)."
         )
 
     if blockers:
@@ -901,6 +983,7 @@ def assess_model_readiness(
         "verdict": verdict,
         "target_candidates": candidate_targets,
         "covariates": covariates,
+        "categorical_covariates": categorical_covariates,
         "warnings": warnings,
         "blockers": blockers,
         "next_actions": next_actions,
@@ -1196,7 +1279,7 @@ def prepare_training_file(
     formulation_column: str = DEFAULT_FORMULATION_COLUMN,
     quantity_column: str = DEFAULT_QUANTITY_COLUMN,
 ) -> Tuple[str, List[str], List[str]]:
-    """Write a pickle file preserving list columns for LocalFileDataLoader."""
+    """Write a training CSV, keeping numeric and categorical covariate columns."""
     if output_path is None:
         output_path = os.path.join(WORK_DIR, "formulation_training_ready.csv")
 
@@ -1208,18 +1291,17 @@ def prepare_training_file(
             and pd.api.types.is_numeric_dtype(df[col])
         ]
 
-    extra_numeric = [
+    extra_cols = [
         col
         for col in df.columns
         if col not in (formulation_column, quantity_column)
         and col not in target_columns
-        and pd.api.types.is_numeric_dtype(df[col])
     ]
-    input_columns = [formulation_column, quantity_column] + extra_numeric
+    input_columns = [formulation_column, quantity_column] + extra_cols
 
     training_df = df[input_columns + target_columns].copy()
     training_df.to_csv(output_path, index=False)
-    logging.info("Wrote training pickle to %s", output_path)
+    logging.info("Wrote training CSV to %s", output_path)
     return output_path, input_columns, target_columns
 
 

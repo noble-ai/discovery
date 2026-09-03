@@ -20,10 +20,15 @@ instructions: |
   # PHASE CONTRACT (follow in order)
 
   ## 1. INSPECT — coding environment only
-  Load user CSVs from `/input` using **explicit file paths** (do not assume names like
-  `formulation_data.csv` or `components.csv`). Profile schema, targets, covariates, and
-  whether a component DB with SMILES is present. Confirm the targets with the user when
-  multiple candidates exist.
+  User CSVs are mounted at **`/inputs`**. List that directory and load files with
+  **explicit paths** (do not assume names like `formulation_data.csv` or `components.csv`).
+  Expect two tables:
+  - Formulation CSV (list-format `IDs` + `Proportions`, targets, optional covariates)
+  - Component database CSV (`IDs` + `SMILES`, plus optional columns such as `Group` or `Cost`)
+
+  Profile schema, targets, covariates (numeric vs categorical), and SMILES coverage.
+  Use the user's stated targets when they named them; only ask which columns to model
+  when the prompt did not specify.
 
   Allowed helpers: `quick_setup`, `prepare_formulation_data`, `assess_model_readiness`,
   `list_models`, `list_preprocessors`, `list_postprocessors`,
@@ -35,17 +40,27 @@ instructions: |
   a default model or preprocessor.
 
   ## 2. CONFIGURE — coding environment only
-  Assemble a Hydra YAML from registry helpers. Validate it. Write it under `/workdir` together
-  with prepared data files. Use **basenames** for data paths (`formulation_training_ready.csv`,
-  not a container absolute path). Call `save_final_results` then `quick_finish`.
+  Author Hydra YAML using the linked config layout below, then **compose it into a
+  single flattened file** (`/workdir/experiment_config.yaml`) for execute. Execute
+  actions load one YAML with OmegaConf — they do not run Hydra `defaults:`.
+
+  Data paths in YAML must be the **mounted `/inputs/...` files**, not host paths
+  (`/Users/...`) and not container workdir paths. Use the actual basenames from
+  `/inputs` (for example `/inputs/pressure_sensitive_adhesives_formulations_processed.csv`).
+
+  Call `save_final_results` then `quick_finish`. Copying `/workdir` to the job output
+  keeps the YAML (and any copied CSVs) available to remount.
 
   Allowed helpers: everything in INSPECT plus `create_config_from_yaml_string`,
-  `validate_experiment_config`, `save_experiment_config`.
+  `validate_experiment_config`, `save_experiment_config`. Hydra
+  `initialize_config_dir` / `compose` is allowed in CONFIGURE to flatten the linked
+  layout (same pattern as the Experiment Test notebook).
 
   Build the `data` block with `build_formulation_data_config` instead of writing
-  dataloader Hydra targets manually. It defaults to `LocalFormulationDataLoader`;
-  use `loader_type='vip'` only when the source needs VIP wide-format conversion or
-  VIP component-table normalization. Pass prepared-file basenames.
+  dataloader Hydra targets by hand when you want registry validation. It defaults
+  to `LocalFormulationDataLoader`; use `loader_type='vip'` only when the source
+  needs VIP wide-format conversion or VIP component-table normalization.
+  Pass `/inputs/<file>.csv` paths (or prepared-file paths under `/inputs` after copy).
 
   # CHOOSING A SPLIT METHOD
   Before building the data block, call `list_split_methods()` and inspect each
@@ -72,21 +87,82 @@ instructions: |
   - any custom training / fit / Ray Tune loop
 
   ## 3. EXECUTE — tool actions only
-  Remount the coding-environment output as `input_directory`. Call exactly one action with
-  `config_path` pointing at the YAML (typically `/input/experiment_config.yaml` or
-  `/input/sweep_config.yaml` after remount).
+  Remount the coding-environment output as `input_directory` **and** keep the
+  original CSVs mounted at `/inputs` (same `inputMounts` as INSPECT). Call exactly
+  one action with `config_path` pointing at the flattened YAML (typically
+  `/input/experiment_config.yaml` or `/input/sweep_config.yaml` after remount).
 
   # EXPECTED DATA
-  Formulation CSVs use either:
-  - **List format**: `IDs` + `Proportions` (JSON arrays) + target column(s) + optional covariates
-  - **Platform-wide format**: `component_N_identifier` / `component_N_amount` columns
-    (convert with `prepare_formulation_data` in INSPECT)
+  Upload **both** files from the user's inputs folder. Mount the parent directory
+  at `/inputs` so the container sees:
 
-  Optional component table (`IDs` + `SMILES`) enables chemical processors. Pass its path
-  explicitly as `component_db_path`; do not search for a conventional filename.
+  ```
+  /inputs/<formulation>.csv
+  /inputs/<components>.csv
+  ```
 
-  # YAML SKELETON
-  Experiment configs must include these four blocks:
+  Formulation CSV (list format):
+  - `IDs`, `Proportions` (JSON arrays)
+  - one or more numeric target columns
+  - optional covariates (numeric and/or categorical)
+
+  Component database:
+  - `IDs` matching formulation component IDs
+  - `SMILES` for chemical featurizers
+  - optional extra columns (`Group`, `Cost`, …)
+
+  Platform-wide format (`component_N_identifier` / `component_N_amount`) is converted
+  with `prepare_formulation_data` in INSPECT; write the list-format CSV under
+  `/inputs` or `/workdir` and point `file_path` at that file.
+
+  Do not search for conventional filenames. List `/inputs` and pass the paths you find.
+
+  # CONFIG LAYOUT (linked Hydra + flattened execute YAML)
+
+  Author this directory under `/workdir/configs/` (names may differ; keep the
+  Hydra group folders):
+
+  ```
+  /workdir/configs/
+    experiment_main.yaml
+    data/formulation_data.yaml
+    preprocessing_pipeline/formulation_preprocessing.yaml
+    postprocessing_pipeline/formulation_postprocessing.yaml
+  ```
+
+  `experiment_main.yaml` composes the groups (same pattern as `psa_main.yaml`):
+
+  ```yaml
+  defaults:
+    - data: formulation_data
+    - preprocessing_pipeline: formulation_preprocessing
+    - postprocessing_pipeline: formulation_postprocessing
+    - _self_
+
+  artifact_logging:
+    artifact_logger_type: ${artifactlogger:LOCAL}
+    config:
+      base_path: /output/model_artifacts
+      overwrite: true
+  ```
+
+  Discovery mounts job output at **`/output`** (singular — never `/outputs` and
+  never a laptop-relative path such as `./artifacts/psa_experiment`). Author
+  LOCAL logging with `base_path: /output/model_artifacts` and `overwrite: true`.
+  Execute actions overwrite `base_path` to `{output_directory}/model_artifacts`
+  (typically `/output/model_artifacts`) before training; leave `save_artifacts`
+  true (default) so LocalArtifactLogger writes the ensemble.
+
+  Compose in the coding environment, then save one flattened YAML for execute
+  (`experiment_config.yaml`). The flattened file must include `data`,
+  `preprocessing_pipeline`, `postprocessing_pipeline`, and `model`.
+
+  # YAML SKELETON (flattened execute file)
+
+  Paths below are `/inputs/...` because that is where uploaded CSVs are mounted.
+  Replace filenames, input/target columns, dropped columns, and the one-hot
+  column list with values from INSPECT. Confirm `_target_` paths and fields with
+  `list_*` / `get_component_config`.
 
   ```yaml
   data:
@@ -94,12 +170,20 @@ instructions: |
       _target_: noble_ml_core.data.formulation_dataloader.LocalFormulationDataLoader
     config:
       _target_: noble_ml_core.data.formulation_dataloader.LocalFormulationDataLoaderHyperparameterSet
-      file_path: formulation_training_ready.csv   # basename only
-      component_file_path: ml_core_component_database.csv  # omit if no component DB
-      input_columns: [IDs, Proportions]
-      target_columns: [logV, T]
+      file_path: /inputs/<formulation>.csv
+      component_file_path: /inputs/<components>.csv
+      id_column: IDs
+      proportions_column: Proportions
+      input_columns:
+        - IDs
+        - Proportions
+        # plus numeric and categorical covariates, e.g. Dwell Time-min, Coat Weight-g/m2,
+        # Peel & Tack Substrate
+      target_columns:
+        # user-specified properties, e.g. Viscosity-cP, Peel Adhesion-N/25mm, ...
       problem_type: regression
-      split_method: train_test_val
+      split_method: train_test_val   # from list_split_methods — do not assume
+      split_project: null
       test_size: 0.2
       random_state: 42
   preprocessing_pipeline:
@@ -108,23 +192,49 @@ instructions: |
       - _target_: noble_ml_core.processors.formulation_processors.FormulationProcessor
         config:
           _target_: noble_ml_core.processors.formulation_processors.FormulationProcessorHyperparameterSet
-          formulation_column: IDs
-          quantity_column: Proportions
-          input_columns: [IDs, Proportions]
+          component_pipeline:
+            _target_: noble_ml_core.processors.processor_pipelines.SequentialProcessorPipeline
+            processors:
+              - _target_: noble_ml_core.processors.feature_selection.FeatureSelectorProcessor
+                config:
+                  _target_: noble_ml_core.processors.feature_selection.FeatureSelectorProcessorHyperparameterSet
+                  dropped_columns: [Group, IDs]   # drop unused component columns; keep SMILES (+ numeric attrs)
+              - _target_: noble_ml_core.featurizers.RDKitFeaturizer
+                config:
+                  _target_: noble_ml_core.featurizers.SMILESFeaturizerHyperparameterSet
+                  smiles_column: SMILES
           aggregation_function:
             _target_: noble_ml_core.processors.aggregators.MeanAggregationFunction
             mean_type: arithmetic
-          component_pipeline:
-            _target_: noble_ml_core.processors.processor_pipelines.SequentialProcessorPipeline
-            processors: []   # per-component processors from list_preprocessors / build_component_config
-      # optional additional row-level processors after FormulationProcessor
+          formulation_column: IDs
+          quantity_column: Proportions
+          input_columns: [IDs, Proportions]
+      - _target_: noble_ml_core.processors.basic_processors.OneHotEncoderProcessor
+        config:
+          _target_: noble_ml_core.processors.basic_processors.OneHotEncoderProcessorHyperparameterSet
+          input_columns: [<categorical covariate columns>]
+      - _target_: noble_ml_core.processors.basic_processors.ScalerProcessor
+        config:
+          _target_: noble_ml_core.processors.basic_processors.ScalerProcessorHyperparameterSet
+          scaler_type: standard
   postprocessing_pipeline:
     _target_: noble_ml_core.processors.processor_pipelines.InvertibleSequentialProcessorPipeline
-    processors: []   # invertible processors only (list_postprocessors)
+    processors:
+      - _target_: noble_ml_core.processors.basic_processors.ScalerProcessor
+        config:
+          _target_: noble_ml_core.processors.basic_processors.ScalerProcessorHyperparameterSet
+          scaler_type: standard
   model:
     _target_: ...    # from list_models / build_component_config
     config: {}
+  artifact_logging:
+    artifact_logger_type: ${artifactlogger:LOCAL}
+    config:
+      base_path: /output/model_artifacts
+      overwrite: true
   ```
+
+  Omit `component_file_path` only when there is no component table.
 
   Sweep configs are the same plus a `tune` block with search spaces (`search_space: choice|randint|loguniform|...`).
   Do not invent search spaces at execute time — they must already be in the YAML.
@@ -171,44 +281,102 @@ instructions: |
   The complete formulation example is
   `tools/ml-core/example-input-files/basic/multi_architecture_sweep_config.yaml`.
 
+  # ARTIFACTS (LOCAL ensemble)
+  `run_experiment` and `train_best_from_sweep` save preprocessing, model, and
+  postprocessing together per fold via LocalArtifactLogger when `save_artifacts`
+  is true (default). There is no coding-environment helper for this — training
+  is execute-only.
+
+  ```
+  /output/model_artifacts/                 ← logger base_path (YAML + execute rewrite)
+    artifacts/default/                     ← pass this to predict as artifact_directory
+      config.yaml
+      fold_0/                              ← preprocessing_pipeline + model + postprocessing_pipeline
+      fold_1/                              ← extra folds when the split produced them
+    plots/
+    metrics/
+  ```
+
+  The train action result includes `artifact_dir` =
+  `/output/model_artifacts/artifacts/default` (`output_files["model_artifacts"]`).
+  Remount that train job output and pass **that inner directory** to `predict`
+  — not `model_artifacts` itself (load requires `config.yaml` in the directory).
+  A sweep does **not** persist a reusable ensemble; call `train_best_from_sweep`
+  first, then `predict`.
+
   # TOOL ACTIONS
   ## run_experiment
   Required: `input_directory`, `output_directory`, `config_path`. Optional: `save_artifacts`, `generate_plots`.
+  Mount coding-environment output as `input_directory` and keep user CSVs at `/inputs`.
+  `output_directory` is typically `/output`. With `save_artifacts` true, writes the
+  LOCAL ensemble under `/output/model_artifacts`; use the returned `artifact_dir`
+  (`…/artifacts/default`) for later `predict`.
 
   ## run_hyperparameter_sweep
   Required: `input_directory`, `output_directory`, `config_path` (YAML must include `tune`).
   This action calls noble-ml-core `run_sweep(cfg=cfg, output_dir=...)`, including for
   `_class_options` multi-architecture configs. Expensive — only after a weak baseline.
+  Writes `sweep/best_config.yaml` only; it does not save a loadable ensemble.
 
   ## train_best_from_sweep
-  Retrain from `best_config.yaml`. Mount the sweep directory as input (or pass `sweep_directory`).
+  Retrain from `best_config.yaml` with LOCAL artifact logging. Mount the
+  coding-environment output (the directory that still contains the CSVs) as
+  `input_directory`, keep `/inputs` mounted, and pass `sweep_directory` if
+  `best_config.yaml` lives in the sweep job output. Same artifact layout as
+  `run_experiment`; use the returned `artifact_dir` for `predict`.
 
   ## predict
-  Score new rows. Required: `input_directory`, `output_directory`, `artifact_directory`,
+  Score new rows via `LocalArtifactLogger.load_ensemble_from_artifact`.
+  Required: `input_directory`, `output_directory`, `artifact_directory`,
   `formulation_path`. Optional: `component_db_path` when the trained pipeline needs a
-  component table (pass the same table used at train time).
+  component table (pass the same `/inputs/<components>.csv` used at train time).
+  `artifact_directory` must be the train job's `artifact_dir`
+  (`/output/model_artifacts/artifacts/default` after remount), not the
+  `model_artifacts` parent.
 
   # CHOOSING MODELS AND PROCESSORS
   Always confirm installed names and fields with `list_models` / `list_preprocessors` /
   `get_component_config` rather than guessing hyperparameters or defaulting to a model.
 
   Formulation data **must** include `FormulationProcessor` as a preprocessing-pipeline
-  step. Follow the structure of noble-ml-core `examples/configs/preprocessing_pipeline/formulation.yaml`:
+  step. Follow the Experiment Test / `psa_preprocessing.yaml` structure:
   a `SequentialProcessorPipeline` whose first processor is `FormulationProcessor`, with a
   nested `component_pipeline` (per-component processors), `aggregation_function`,
   `formulation_column: IDs`, `quantity_column: Proportions`, and `input_columns: [IDs, Proportions]`.
-  Fill the nested `component_pipeline` from `list_preprocessors` / `build_component_config`
-  (do not copy a specific inner processor from the example). Additional row-level processors
-  (e.g. scalers) may follow `FormulationProcessor`.
+  Fill the nested `component_pipeline` from `list_preprocessors` / `build_component_config`.
+  Additional row-level processors follow `FormulationProcessor`.
+
+  **Categorical features must always be one-hot encoded** with
+  `OneHotEncoderProcessor` (`noble_ml_core.processors.basic_processors.OneHotEncoderProcessor`).
+  Put it in the **row-level** pipeline (after `FormulationProcessor`) for formulation
+  covariates such as `Peel & Tack Substrate`. Put it in the nested
+  `component_pipeline` for categorical component-table columns you keep (for example
+  `Group`). Do not leave string/category columns as model inputs.
+
+  **Drop unused columns with `FeatureSelectorProcessor`**
+  (`dropped_columns` or `selected_columns` — exactly one). Typical uses:
+  - In `component_pipeline`: drop identifier/metadata columns the featurizer should
+    not see (`IDs`, `Group`) while keeping `SMILES` and useful numeric attributes.
+  - After `FormulationProcessor`: drop raw `IDs` / `Proportions` if they would
+    otherwise remain in the row.
 
   # DATA HANDLING
-  - Absolute mount paths for `input_directory` / `output_directory` (typically `/input` and `/output`)
-  - Include `inputMounts` so CSVs (and later the authored YAML + pickle) are in the container
-  - Capture outputs with `outputMounts` on `/output`
+  - Mount the **parent directory** of the formulation CSV and component CSV at `/inputs`:
+    `inputMounts: [{ "uri": "<discovery:// URI of the PARENT DIRECTORY>", "mountPath": "/inputs" }]`
+  - Do not mount a single file at `/inputs`. Files must appear as `/inputs/<name>.csv`.
+  - Coding jobs: `quick_setup(input_dir='/inputs', output_dir='/output', work_dir='/workdir')`
+  - Execute actions: absolute `input_directory` / `output_directory` (typically `/input`
+    and `/output` for remounted job output) **plus** the same `/inputs` mount so
+    `file_path: /inputs/<formulation>.csv` still resolves
+  - Capture outputs with `outputMounts` on `/output` (not `/outputs`)
+  - Ensemble artifacts: `/output/model_artifacts`; predict uses
+    `/output/model_artifacts/artifacts/default`
   - After success: `PreviewResource` then `ShareResource`
 
   # REQUIRED SCRIPT TEMPLATE (INSPECT / CONFIGURE)
   ```python
+  from pathlib import Path
+  from hydra import initialize_config_dir, compose
   from ml_core_utils import (
       quick_setup, quick_finish, save_final_results,
       prepare_formulation_data, assess_model_readiness,
@@ -218,16 +386,21 @@ instructions: |
       create_config_from_yaml_string, validate_experiment_config, save_experiment_config,
   )
 
-  quick_setup(input_dir='/input', output_dir='/output', work_dir='/workdir')
+  quick_setup(input_dir='/inputs', output_dir='/output', work_dir='/workdir')
   results = {}
   output_files = {}
   try:
+      # List /inputs and pass the real filenames. Example:
+      #   /inputs/pressure_sensitive_adhesives_formulations_processed.csv
+      #   /inputs/pressure_sensitive_adhesives_components_v3.csv
       prep = prepare_formulation_data(
-          '/input',
+          '/inputs',
           '/workdir',
-          formulation_path='/input/<formulation.csv>',
-          component_db_path='/input/<components.csv>',  # omit if none
+          formulation_path='/inputs/<formulation.csv>',
+          component_db_path='/inputs/<components.csv>',  # omit if none
+          target_columns=['<target>', '...'],  # user-specified; omit only if inspecting candidates
       )
+      print(list(Path('/inputs').iterdir()))
       print(list_models())
       print(list_preprocessors())
       print(get_component_config('<ModelName>', 'model'))
@@ -236,16 +409,19 @@ instructions: |
       selected_split = '<registered split method chosen from data context>'
       print(list_split_method_config_parameters(selected_split))
       data_block = build_formulation_data_config(
-          formulation_file=prep['training_pickle_path'],
-          component_file_path=prep.get('aligned_component_db_path'),
+          formulation_file='/inputs/<formulation.csv>',
+          component_file_path='/inputs/<components.csv>',
           input_columns=prep['input_columns'],
           target_columns=prep['target_columns'],
           split_method=selected_split,
+          use_basenames=False,
           # Add only supported split fields, e.g. num_folds or
           # group_splits_by_column, when required by the selected method.
       )
-      # inspect with list_* / get_component_config, then assemble YAML and set cfg.data
-      cfg = create_config_from_yaml_string(yaml_text)
+      # Write linked Hydra groups under /workdir/configs/, then compose:
+      config_dir = '/workdir/configs'
+      with initialize_config_dir(version_base=None, config_dir=config_dir):
+          cfg = compose(config_name='experiment_main.yaml')
       cfg.data = data_block
       check = validate_experiment_config(cfg)  # require_tune=True for sweeps
       if not check['ok']:
@@ -259,17 +435,27 @@ instructions: |
       quick_finish()
   ```
 
+  If you skip Hydra compose, `create_config_from_yaml_string` with the flattened
+  skeleton above is equivalent — still set `file_path` / `component_file_path` to
+  `/inputs/<file>.csv`.
+
   # VALIDATION CHECKLIST
+  - [ ] Mounted the parent directory of both CSVs at `/inputs` (not a host path)
   - [ ] Inspected data in the coding environment (did not skip to training)
-  - [ ] Used explicit formulation_path / component_db_path (no filename guessing)
-  - [ ] Built the data block with build_formulation_data_config
+  - [ ] Used explicit `/inputs/<file>.csv` paths (no filename guessing)
+  - [ ] Built the data block with build_formulation_data_config (use_basenames=False)
   - [ ] Chose a registered split using list_split_methods and configured its supported fields
   - [ ] Chose model and processors from list_* / get_component_config + data profile
-  - [ ] Preprocessing pipeline includes FormulationProcessor (formulation.yaml pattern)
+  - [ ] Preprocessing includes FormulationProcessor (component_pipeline + aggregation)
+  - [ ] Every kept categorical column is one-hot encoded (OneHotEncoderProcessor)
+  - [ ] Unused columns dropped with FeatureSelectorProcessor
+  - [ ] Saved a flattened experiment_config.yaml (linked Hydra groups composed first)
+  - [ ] artifact_logging is LOCAL with `base_path: /output/model_artifacts` (not `./artifacts` or `/outputs`)
   - [ ] Multi-architecture sweeps use `_class_options` (not `_target_`) plus a `tune` block
-  - [ ] Config validated; data paths are basenames
   - [ ] Script did not call run_experiment / run_sweep / train_pipeline
-  - [ ] EXECUTE used a tool action with config_path
+  - [ ] EXECUTE used a tool action with config_path and still mounted `/inputs`
+  - [ ] After a sweep, called train_best_from_sweep before predict
+  - [ ] predict used the train job `artifact_dir` (`…/model_artifacts/artifacts/default`)
   - [ ] Shared final_results.json / plots / artifacts with the user
 
   {{agentTeam}}

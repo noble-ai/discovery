@@ -28,7 +28,7 @@ RUN pip3 install --no-cache-dir uv && \
     git config --global --add safe.directory '*'
 
 ARG INFERENCE_BACKEND=cpu
-ARG EXTRAS=models-forest,models-torch,training,chemical-featurizers-all
+ARG EXTRAS=all
 
 # Staged context (az acr build / stage-build-context.sh)
 COPY noble-ml-core/ /src/noble-ml-core/
@@ -47,8 +47,8 @@ RUN FINAL_EXTRAS="${EXTRAS},${INFERENCE_BACKEND}" && \
 ENV PATH="/opt/noble-ml/bin:${PATH}"
 ENV PYTHONPATH="/opt/noble-ml/lib/python3.12/site-packages:/app"
 
-RUN mkdir -p /workdir /input /output /tmp/matplotlib /app && \
-    chmod 755 /workdir /input /output
+RUN mkdir -p /workdir /inputs /output /tmp/matplotlib /app && \
+    chmod 755 /workdir /inputs /output
 
 COPY ml_core_utils.py /app/ml_core_utils.py
 COPY entrypoint.py /app/entrypoint.py

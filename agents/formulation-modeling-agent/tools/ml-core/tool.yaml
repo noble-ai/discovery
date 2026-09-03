@@ -5,7 +5,7 @@ description: >
   config via noble-ml-core (run_experiment, hyperparameter sweep, retrain-best,
   predict). Supports registry models (XGBoost, Linear, TabPFN, FCN, GP, etc.)
   and featurizers (OneHot, RDKit, Mordred, Morgan, ChemBERTa).
-version: 0.4.0
+version: 0.5.1
 category: Machine Learning
 license: Proprietary
 
@@ -36,23 +36,39 @@ actions:
   - name: run_experiment
     description: >
       Run noble-ml-core training from an authored Hydra experiment_config.yaml.
-      config_path is required. Mount the coding-environment output (YAML + data
-      files) as input_directory. Writes metrics, plots, and optional LOCAL artifacts.
+      config_path is required. Mount the coding-environment output (flattened YAML)
+      as input_directory, and mount the original formulation + component CSVs at
+      /inputs (same parent-directory inputMounts as the coding job). YAML
+      file_path / component_file_path must be /inputs/<filename>.csv.
+      Execute overwrites artifact_logging.config.base_path to
+      {output_directory}/model_artifacts (typically /output/model_artifacts).
+      With save_artifacts true (default), LocalArtifactLogger writes the ensemble
+      (preprocessing_pipeline, model, postprocessing_pipeline per fold) under
+      {output_directory}/model_artifacts/artifacts/default — pass that path to
+      predict as artifact_directory. Do not author ./artifacts or /outputs.
     infra_node: worker
     input_schema:
       type: object
       properties:
         input_directory:
           type: string
-          description: Directory with experiment_config.yaml and prepared data files.
+          description: >
+            Directory with experiment_config.yaml (coding-environment output).
+            Also mount the original CSVs at /inputs.
         output_directory:
           type: string
+          description: >
+            Discovery job output mount, typically /output. Ensemble artifacts
+            are written at {output_directory}/model_artifacts/artifacts/default.
         config_path:
           type: string
           description: Path to experiment_config.yaml authored in the coding environment.
         save_artifacts:
           type: string
-          description: If true (default), persist model artifacts for predict.
+          description: >
+            If true (default), persist the LOCAL ensemble under
+            {output_directory}/model_artifacts for predict. Set false only when
+            you do not need to score later.
         generate_plots:
           type: string
       required:
@@ -70,20 +86,21 @@ actions:
     description: >
       Ray Tune sweep (noble-ml-core run_sweep) from an authored sweep_config.yaml
       that already includes a tune block. config_path is required. Writes
-      sweep/best_config.yaml. Expensive — use after a weak baseline, then call
-      train_best_from_sweep.
+      sweep/best_config.yaml. Does not persist a reusable LOCAL ensemble —
+      call train_best_from_sweep after the sweep, then predict. Expensive —
+      use after a weak baseline.
     infra_node: worker
     input_schema:
       type: object
       properties:
         input_directory:
           type: string
-          description: Directory with sweep_config.yaml and prepared data files.
+          description: >
+            Directory with sweep_config.yaml (coding-environment output).
+            Also mount the original CSVs at /inputs.
         output_directory:
           type: string
-        config_path:
-          type: string
-          description: Path to sweep_config.yaml (must include a tune block).
+          description: Discovery job output mount, typically /output. Sweep results go under {output_directory}/sweep.
       required:
         - input_directory
         - output_directory
@@ -95,23 +112,34 @@ actions:
 
   - name: train_best_from_sweep
     description: >
-      Retrain using sweep/best_config.yaml with LOCAL artifact logging. Call after
-      run_hyperparameter_sweep. Mount the sweep output directory as input_directory
-      or pass sweep_directory.
+      Retrain using sweep/best_config.yaml with LOCAL artifact logging so predict
+      can load the ensemble. Call after run_hyperparameter_sweep. Mount the
+      coding-environment output (directory that still has access to the CSVs) as
+      input_directory, keep /inputs mounted, and pass sweep_directory when
+      best_config.yaml is in the sweep job output. Same layout as run_experiment:
+      {output_directory}/model_artifacts/artifacts/default.
     infra_node: worker
     input_schema:
       type: object
       properties:
         input_directory:
           type: string
-          description: Sweep directory containing best_config.yaml (or parent).
+          description: >
+            Coding-environment output (or other dir with the training CSVs).
+            Keep the original CSVs mounted at /inputs.
         output_directory:
           type: string
+          description: >
+            Discovery job output mount, typically /output. Ensemble artifacts
+            are written at {output_directory}/model_artifacts/artifacts/default.
         sweep_directory:
           type: string
           description: Explicit path to sweep dir if different from input_directory.
         save_artifacts:
           type: string
+          description: >
+            If true (default), persist the LOCAL ensemble under
+            {output_directory}/model_artifacts for predict.
         generate_plots:
           type: string
       required:
@@ -126,28 +154,43 @@ actions:
 
   - name: predict
     description: >
-      Load LOCAL ensemble artifacts from a prior run_experiment / train_best_from_sweep
-      and predict on new formulation rows. Writes predictions.csv.
+      Load the LOCAL ensemble from a prior run_experiment / train_best_from_sweep
+      via LocalArtifactLogger.load_ensemble_from_artifact and score new
+      formulation rows. Writes predictions.csv. artifact_directory must be the
+      directory that contains config.yaml and fold_* (typically
+      /output/model_artifacts/artifacts/default from the train job), not the
+      model_artifacts parent.
     infra_node: worker
     input_schema:
       type: object
       properties:
         input_directory:
           type: string
-          description: Directory containing the formulation CSV to score.
+          description: >
+            Directory containing the formulation CSV to score. Prefer mounting
+            the original CSVs at /inputs and passing /inputs/<file>.csv.
         output_directory:
           type: string
+          description: Discovery job output mount, typically /output.
         artifact_directory:
           type: string
-          description: Path to saved model artifacts (…/artifacts/default).
+          description: >
+            Path to the saved ensemble directory that contains config.yaml and
+            fold_* subfolders (preprocessing_pipeline, model,
+            postprocessing_pipeline). Typically
+            /output/model_artifacts/artifacts/default from the train job
+            (result.artifact_dir). Do not pass the model_artifacts parent.
         formulation_path:
           type: string
-          description: Path to the formulation CSV (absolute or relative to input_directory).
+          description: >
+            Path to the formulation CSV to score (typically
+            /inputs/<formulation>.csv).
         component_db_path:
           type: string
           description: >
-            Optional path to a component database CSV. Needed when the trained
-            pipeline uses FormulationProcessor with a component table (e.g. SMILES).
+            Optional path to a component database CSV (typically
+            /inputs/<components>.csv). Needed when the trained pipeline uses
+            FormulationProcessor with a component table (e.g. SMILES).
             Omit for ID-only models.
       required:
         - input_directory
@@ -168,19 +211,35 @@ code_environments:
       Python code environment with noble-ml-core and ml_core_utils for inspecting
       formulation data and authoring Hydra YAML. Do NOT train here.
 
+      Mount the parent directory of the uploaded formulation CSV and component
+      CSV at /inputs (inputMounts mountPath /inputs). List /inputs and pass
+      explicit paths such as
+      /inputs/pressure_sensitive_adhesives_formulations_processed.csv and
+      /inputs/pressure_sensitive_adhesives_components_v3.csv. Do not use host
+      paths like /Users/.../inputs/.
+
       Use this environment only to:
-      - Load and profile CSVs (prepare_formulation_data with explicit formulation_path
-        / component_db_path, assess_model_readiness)
+      - Load and profile CSVs (prepare_formulation_data with explicit
+        formulation_path / component_db_path under /inputs, assess_model_readiness)
       - List registry components (list_models, list_preprocessors, list_postprocessors,
         get_component_config, build_component_config)
       - Inspect registered data splits (list_split_methods,
         list_split_method_config_parameters)
-      - Build the standard data block (build_formulation_data_config: local by default,
-        loader_type="vip" for VIP normalization)
-      - Assemble, validate, and save experiment_config.yaml or sweep_config.yaml
+      - Build the standard data block (build_formulation_data_config; local by default,
+        loader_type="vip" for VIP normalization; use_basenames=False so file_path
+        stays /inputs/<file>.csv)
+      - Author linked Hydra groups (data/, preprocessing_pipeline/,
+        postprocessing_pipeline/) then compose and save a flattened
+        experiment_config.yaml or sweep_config.yaml
+      - Set artifact_logging to LOCAL with base_path /output/model_artifacts
+        and overwrite: true (never ./artifacts or /outputs). Execute rewrites
+        base_path to {output_directory}/model_artifacts
+      - One-hot encode every kept categorical column (OneHotEncoderProcessor);
+        drop unused columns with FeatureSelectorProcessor (dropped_columns or
+        selected_columns)
       - Call save_final_results() and quick_finish()
 
       Never import or call run_experiment, run_sweep, or train_pipeline.
-      Write data files and YAML to /workdir using basenames for file_path
-      (e.g. formulation_training_ready.csv). Training is a later tool action.
+      Write YAML to /workdir. Data file_path / component_file_path in that YAML
+      must be /inputs/<filename>.csv. Training is a later tool action.
     infra_node: worker

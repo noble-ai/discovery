@@ -26,6 +26,7 @@ from ml_core_utils import (
     create_config_from_yaml_string,
     detect_data_format,
     get_component_config,
+    get_component_hydra_target,
     list_models,
     list_postprocessors,
     list_preprocessors,
@@ -158,7 +159,26 @@ class TestPhase1DataPrep:
         assert "recommended_model_type" not in readiness
         assert "recommended_preprocessor" not in readiness
         assert "covariates" in readiness
+        assert "categorical_covariates" in readiness
         assert readiness["has_component_smiles"] is False
+        assert not any("confirm the target" in action for action in readiness["next_actions"])
+
+    def test_assess_model_readiness_flags_categoricals(self, tmp_path):
+        path = tmp_path / "formulation.csv"
+        pd.DataFrame(
+            {
+                DEFAULT_FORMULATION_COLUMN: ["[1, 2]", "[2, 3]", "[1, 3]"],
+                DEFAULT_QUANTITY_COLUMN: ["[0.5, 0.5]", "[0.4, 0.6]", "[0.7, 0.3]"],
+                "T": [298.15, 303.15, 308.15],
+                "Peel & Tack Substrate": ["Steel", "Glass", "HDPE"],
+                "logV": [-0.4, -0.3, -0.2],
+            }
+        ).to_csv(path, index=False)
+        df = load_formulation_csv(str(path), target_columns=["logV"])
+        readiness = assess_model_readiness(df, candidate_targets=["logV"])
+        assert "Peel & Tack Substrate" in readiness["categorical_covariates"]
+        assert any("OneHotEncoderProcessor" in action for action in readiness["next_actions"])
+        assert any("FeatureSelectorProcessor" in action for action in readiness["next_actions"])
 
     def test_prepare_formulation_inputs_list_format(self, sample_csv, tmp_path):
         prep = prepare_formulation_inputs(
@@ -246,6 +266,24 @@ class TestPrepareTrainingFile:
         assert os.path.exists(path)
         assert DEFAULT_FORMULATION_COLUMN in input_cols
         assert target_cols == ["logV"]
+        assert "T" in input_cols
+
+    def test_keeps_categorical_covariates(self, tmp_path):
+        df = pd.DataFrame(
+            {
+                DEFAULT_FORMULATION_COLUMN: [["1", "2"]],
+                DEFAULT_QUANTITY_COLUMN: [[0.5, 0.5]],
+                "T": [298.15],
+                "Peel & Tack Substrate": ["Steel"],
+                "logV": [-0.4],
+            }
+        )
+        output = tmp_path / "train.csv"
+        _path, input_cols, _targets = prepare_training_file(
+            df, output_path=str(output), target_columns=["logV"]
+        )
+        assert "Peel & Tack Substrate" in input_cols
+        assert "T" in input_cols
 
 
 class TestSaveFinalResults:
@@ -301,6 +339,11 @@ class TestRegistryHelpers:
         assert "ScalerProcessor" in post
         assert "OneHotEncoderProcessor" in pre
 
+    def test_get_component_hydra_target(self):
+        block = get_component_hydra_target("OneHotEncoderProcessor", "processor")
+        assert block["_target_"].endswith("OneHotEncoderProcessor")
+        assert block["config"]["_target_"]
+
     def test_get_component_config_model(self):
         schema = get_component_config("XGBModel", "model")
         assert "problem_type" in schema
@@ -325,18 +368,26 @@ class TestRegistryHelpers:
 class TestConfigHelpers:
     def test_build_local_formulation_data_config(self):
         data = build_formulation_data_config(
-            "/workdir/custom_formulations.pkl",
+            "/inputs/custom_formulations.csv",
             ["logV"],
-            component_file_path="/workdir/custom_components.csv",
+            component_file_path="/inputs/custom_components.csv",
             input_columns=["IDs", "Proportions", "T"],
         )
         assert data["dataloader"]["_target_"].endswith(
             "LocalFormulationDataLoader"
         )
-        assert data["config"]["file_path"] == "custom_formulations.pkl"
-        assert data["config"]["component_file_path"] == "custom_components.csv"
+        assert data["config"]["file_path"] == "/inputs/custom_formulations.csv"
+        assert data["config"]["component_file_path"] == "/inputs/custom_components.csv"
         assert data["config"]["input_columns"] == ["IDs", "Proportions", "T"]
         assert data["config"]["target_columns"] == ["logV"]
+
+    def test_build_formulation_data_config_basenames_optional(self):
+        data = build_formulation_data_config(
+            "/inputs/custom_formulations.csv",
+            ["logV"],
+            use_basenames=True,
+        )
+        assert data["config"]["file_path"] == "custom_formulations.csv"
 
     def test_build_vip_formulation_data_config(self):
         data = build_formulation_data_config(
@@ -411,7 +462,13 @@ data:
     target_columns: [logV]
 preprocessing_pipeline:
   _target_: noble_ml_core.processors.processor_pipelines.SequentialProcessorPipeline
-  processors: []
+  processors:
+    - _target_: noble_ml_core.processors.formulation_processors.FormulationProcessor
+      config:
+        _target_: noble_ml_core.processors.formulation_processors.FormulationProcessorHyperparameterSet
+        formulation_column: IDs
+        quantity_column: Proportions
+        input_columns: [IDs, Proportions]
 postprocessing_pipeline:
   _target_: noble_ml_core.processors.processor_pipelines.InvertibleSequentialProcessorPipeline
   processors: []
@@ -424,9 +481,28 @@ model:
         )
 
     def test_validate_experiment_config_ok(self):
-        check = validate_experiment_config(self._minimal_cfg())
+        check = validate_experiment_config(
+            self._minimal_cfg(file_path="/inputs/formulation.csv")
+        )
         assert check["ok"] is True
         assert check["has_tune"] is False
+        assert check["warnings"] == []
+
+    def test_validate_experiment_config_rejects_host_path(self):
+        check = validate_experiment_config(
+            self._minimal_cfg(
+                file_path="/Users/austin/code/discovery_sandbox/inputs/formulation.csv"
+            )
+        )
+        assert check["ok"] is False
+        assert any("host path" in error for error in check["errors"])
+
+    def test_validate_experiment_config_requires_formulation_processor(self):
+        cfg = self._minimal_cfg(file_path="/inputs/formulation.csv")
+        cfg.preprocessing_pipeline.processors = []
+        check = validate_experiment_config(cfg)
+        assert check["ok"] is False
+        assert any("FormulationProcessor" in error for error in check["errors"])
 
     def test_validate_experiment_config_missing_keys(self):
         check = validate_experiment_config({"data": {}})
@@ -467,6 +543,21 @@ model:
         rebased = _rebase_config_paths(cfg, str(new_in), str(new_out))
         assert rebased.data.config.file_path == str(remounted.resolve())
         assert "model_artifacts" in str(rebased.artifact_logging.config.base_path)
+
+    def test_rebase_config_paths_prefers_data_mount(self, tmp_path, monkeypatch):
+        data_mount = tmp_path / "inputs"
+        other = tmp_path / "other"
+        out = tmp_path / "output"
+        data_mount.mkdir()
+        other.mkdir()
+        out.mkdir()
+        mounted = data_mount / "formulation.csv"
+        mounted.write_text("mounted")
+        (other / "formulation.csv").write_text("stale-copy")
+        monkeypatch.setattr("ml_core_utils.DATA_MOUNT", str(data_mount))
+        cfg = self._minimal_cfg(file_path="/inputs/formulation.csv")
+        rebased = _rebase_config_paths(cfg, str(other), str(out))
+        assert rebased.data.config.file_path == str(mounted.resolve())
 
     def test_rebase_config_paths_rejects_missing_data(self, tmp_path):
         cfg = self._minimal_cfg(file_path="missing.pkl")
