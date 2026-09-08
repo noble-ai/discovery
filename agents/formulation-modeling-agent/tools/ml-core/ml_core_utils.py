@@ -1544,6 +1544,28 @@ def train_best_from_sweep(
     return result
 
 
+def _merge_input_and_predictions(inputs: pd.DataFrame, preds: Any) -> pd.DataFrame:
+    """Join original formulation rows with ensemble prediction columns.
+
+    Prediction-side names win on overlap (``{target}__prediction`` already
+    avoids most collisions). Row order is preserved via positional concat.
+    """
+    if not isinstance(preds, pd.DataFrame):
+        preds = pd.DataFrame(preds)
+    inputs = inputs.reset_index(drop=True)
+    preds = preds.reset_index(drop=True)
+    if len(inputs) != len(preds):
+        logging.warning(
+            "Prediction row count (%s) does not match input row count (%s)",
+            len(preds),
+            len(inputs),
+        )
+    overlap = [column for column in preds.columns if column in inputs.columns]
+    if overlap:
+        inputs = inputs.drop(columns=overlap)
+    return pd.concat([inputs, preds], axis=1)
+
+
 def predict_formulations(
     artifact_directory: str,
     input_directory: str,
@@ -1593,11 +1615,9 @@ def predict_formulations(
         )
 
     preds = ensemble_model.predict(df, **predict_kwargs)
+    merged = _merge_input_and_predictions(df, preds)
     pred_path = os.path.join(output_directory, "predictions.csv")
-    if isinstance(preds, pd.DataFrame):
-        preds.to_csv(pred_path, index=False)
-    else:
-        pd.DataFrame(preds).to_csv(pred_path, index=False)
+    merged.to_csv(pred_path, index=False)
 
     output_files = {"predictions": pred_path}
     if skill_spec is not None:
@@ -1606,7 +1626,7 @@ def predict_formulations(
             json.dump(_json_safe(skill_spec), handle, indent=2)
         output_files["skill_specification"] = skill_path
     return {
-        "n_predictions": int(len(preds)),
+        "n_predictions": int(len(merged)),
         "artifact_directory": artifact_directory,
         "config_model": str(OmegaConf.select(config, "model._target_", default="")),
         "output_files": output_files,

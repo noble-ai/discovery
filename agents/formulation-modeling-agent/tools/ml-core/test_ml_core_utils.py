@@ -16,6 +16,7 @@ from ml_core_utils import (
     DEFAULT_QUANTITY_COLUMN,
     DEFAULT_SMILES_COLUMN,
     _extract_flat_metrics,
+    _merge_input_and_predictions,
     _parse_list_value,
     _rebase_config_paths,
     align_component_database,
@@ -37,6 +38,7 @@ from ml_core_utils import (
     prepare_formulation_data,
     prepare_formulation_inputs,
     prepare_training_file,
+    predict_formulations,
     save_experiment_config,
     save_final_results,
     train_best_from_sweep,
@@ -728,3 +730,72 @@ class TestEntrypointParser:
             ]
         )
         assert args.component_db_path == "/i/chemical_db.csv"
+
+
+class TestPredictMerge:
+    def test_merge_keeps_inputs_and_prediction_columns(self):
+        inputs = pd.DataFrame(
+            {
+                DEFAULT_FORMULATION_COLUMN: ["[1, 2]", "[2, 3]"],
+                DEFAULT_QUANTITY_COLUMN: ["[0.5, 0.5]", "[0.4, 0.6]"],
+                "T": [298.15, 303.15],
+            }
+        )
+        preds = pd.DataFrame({"logV__prediction": [0.1, 0.2], "logV__lower": [0.0, 0.1]})
+        merged = _merge_input_and_predictions(inputs, preds)
+        assert list(merged.columns) == [
+            DEFAULT_FORMULATION_COLUMN,
+            DEFAULT_QUANTITY_COLUMN,
+            "T",
+            "logV__prediction",
+            "logV__lower",
+        ]
+        assert merged["logV__prediction"].tolist() == [0.1, 0.2]
+        assert merged["T"].tolist() == [298.15, 303.15]
+
+    def test_merge_prediction_columns_win_on_overlap(self):
+        inputs = pd.DataFrame({"IDs": ["[1]"], "score": [99.0]})
+        preds = pd.DataFrame({"score": [0.42]})
+        merged = _merge_input_and_predictions(inputs, preds)
+        assert list(merged.columns) == ["IDs", "score"]
+        assert merged["score"].tolist() == [0.42]
+
+    def test_predict_formulations_writes_merged_csv(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        formulation = tmp_path / "new_formulations.csv"
+        pd.DataFrame(
+            {
+                DEFAULT_FORMULATION_COLUMN: ["[1, 2]", "[2, 3]"],
+                DEFAULT_QUANTITY_COLUMN: ["[0.5, 0.5]", "[0.4, 0.6]"],
+                "T": [298.15, 303.15],
+            }
+        ).to_csv(formulation, index=False)
+
+        ensemble = MagicMock()
+        ensemble.predict.return_value = pd.DataFrame(
+            {"logV__prediction": [-0.11, -0.22]}
+        )
+        config = OmegaConf.create(
+            {"data": {"config": {"input_columns": ["IDs", "Proportions", "T"]}}}
+        )
+        monkeypatch.setattr(
+            "ml_core_utils.LocalArtifactLogger.load_ensemble_from_artifact",
+            lambda **_kwargs: (ensemble, None, None, None, config, None),
+        )
+
+        output_dir = tmp_path / "out"
+        result = predict_formulations(
+            str(tmp_path / "artifacts"),
+            str(tmp_path),
+            str(output_dir),
+            formulation_path=str(formulation),
+        )
+        written = pd.read_csv(result["output_files"]["predictions"])
+        assert result["n_predictions"] == 2
+        assert DEFAULT_FORMULATION_COLUMN in written.columns
+        assert DEFAULT_QUANTITY_COLUMN in written.columns
+        assert "T" in written.columns
+        assert "logV__prediction" in written.columns
+        assert written["logV__prediction"].tolist() == [-0.11, -0.22]
+
