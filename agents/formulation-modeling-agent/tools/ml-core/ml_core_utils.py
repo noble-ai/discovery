@@ -89,7 +89,7 @@ def list_postprocessors() -> Dict[str, str]:
         if comp in IGNORE_COMPONENTS:
             continue
         metadata = GLOBAL_PROCESSOR_REGISTRY.get_component_metadata(comp) or {}
-        if metadata.get("invertable"):
+        if metadata.get("invertible"):
             docstring = metadata.get("docstring") or ""
             response[comp] = docstring.replace("\n", "")
     return response

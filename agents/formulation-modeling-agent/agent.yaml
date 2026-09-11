@@ -530,7 +530,7 @@ instructions: |
   {{dataHandlingContext}}
 
 discoveryExtensions:
-  humanInTheLoop: Disabled
+  humanInTheLoop: Enabled
   tools:
     - toolId: '{{mlCoreToolId}}'
       confirmation: Disabled
