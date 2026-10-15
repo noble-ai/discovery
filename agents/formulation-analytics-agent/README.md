@@ -1,38 +1,39 @@
 # NobleAI Formulation Analytics Agent
 
-Explores chemical formulation and tabular experimental CSVs on Microsoft Discovery using Foundry Code Interpreter. It profiles data, computes statistics, and writes self-contained Plotly HTML charts. It does not train models.
+Explores chemical formulation and tabular experimental CSVs on Microsoft Discovery. A Python coding environment profiles data, computes statistics, and writes self-contained Plotly HTML charts. It does not train models.
 
 ## Overview
 
 Chemists and materials scientists often need to inspect formulation tables (component IDs and proportions, targets, process covariates) before any modeling run. This agent answers those exploratory questions in chat: schema and missingness, composition views, correlations, simple cleaning, and a short model-readiness narrative.
 
-It is **not** the NobleAI Formulation Modeling Agent. Modeling (Hydra YAML, `run_experiment`, sweeps, predict) stays on that agent. Use this agent for analysis and charts; switch to formulation modeling with the same uploaded CSVs when you are ready to train.
+It is **not** the NobleAI Formulation Modeling Agent. Modeling (Hydra YAML, training, sweeps, predict) stays on that agent. Use this agent for analysis and charts; switch to formulation modeling with the same uploaded CSVs when you are ready to train.
 
-This version is a prompt agent plus Foundry Code Interpreter. It does not ship a container, Noble analytics tools (`create_chart`, sandbox interpreter, reports, memory), suggested queries, or deep-analysis mode.
+This version is a prompt agent plus one coding-environment container. It does not use Foundry Code Interpreter, chart or table widgets, reports, memory, suggested queries, or deep-analysis mode.
 
 ## Architecture
 
 ```
-User CSV upload → prompt agent → Foundry Code Interpreter
-  → Plotly HTML + optional CSV files
+Linked CSV storage asset
+  → mount parent at /input (optional prior output at /state)
+  → one Python script in the analytics coding environment
+  → /output/charts/*.html, /output/tables/*.csv, /output/state/*
   → PreviewResource / ShareResource
   → markdown takeaways in chat
 ```
 
 - **Model**: workspace chat deployment (`{{CHAT-MODEL}}`).
-- **Compute**: Microsoft-managed Code Interpreter sandbox (pandas and, when installed, Plotly). No Discovery `code_environments` image and no modeling runtime.
-- **Charts**: Plotly `fig.write_html(..., include_plotlyjs=True)` so the HTML is self-contained. Discovery chat does not render an inline Plotly widget; the user previews or downloads the HTML file.
-- **Tables**: small summaries as markdown in the assistant reply; large results as CSV files in the workspace.
+- **Compute**: container image `formulation-analytics` (pandas, scipy, scikit-learn, statsmodels, pyarrow, plotly). Discovery starts the container and mounts files. There is no nested sandbox and no persistent Python kernel.
+- **Charts**: `write_plotly_html` saves self-contained HTML (`include_plotlyjs=True`). Discovery chat does not render an inline Plotly widget; the user previews or downloads the HTML file.
+- **Tables**: small summaries as markdown in the assistant reply; large results as CSV files under `/output/tables`.
+- **State**: variables die when the job exits. Reusable tables are Parquet under `/output/state`. A later job remounts that output at `/state` only when it needs them.
 - **Handoff**: if the user asks to train or predict, the agent points them at the formulation modeling agent. It does not author training YAML.
-
-No session memory is stored beyond the conversation and shared files.
 
 ## Prerequisites
 
 - Microsoft Discovery workspace with a deployed project
 - Azure AI Foundry chat model deployment (`{{CHAT-MODEL}}`)
-- Foundry **Code Interpreter** enabled on the agent (declared in `agent.yaml` as `kind: code_interpreter`; confirm it is attached in Foundry / Discovery Studio at deploy time)
-- Formulation or tabular CSV uploads (optional second component/chemical database CSV)
+- Azure Container Registry for the analytics image
+- Formulation or tabular CSVs registered as Discovery storage assets (Studio does not upload local files)
 
 Sample formulation CSVs used by the modeling agent (do not need to be copied here):
 
@@ -44,23 +45,22 @@ Sample formulation CSVs used by the modeling agent (do not need to be copied her
 | Parameter | Description | Example |
 |-----------|-------------|---------|
 | `{{CHAT-MODEL}}` | Azure AI Foundry model deployment name | `gpt-4o` |
+| `{{analyticsRuntimeToolId}}` | ARM resource ID of the deployed analytics-runtime tool | set at deploy time |
 
-No container image, ACR, or Discovery tool ARM IDs are required.
-
-If Studio does not attach Code Interpreter from catalog YAML alone, enable it on the prompt agent in the Foundry UI when you deploy.
+Build and register `tools/analytics-runtime` before the agent can run scripts. The catalog deployer builds this image when the agent is deployed from the repo.
 
 ## Usage
 
-1. Deploy the agent in Discovery Studio and confirm Code Interpreter is available.
-2. Upload a formulation CSV (and optional component CSV).
-3. Ask an exploratory question. The agent inspects files in Code Interpreter, writes Plotly HTML (and CSVs when needed), then previews and shares those files.
+1. Deploy the agent and the analytics-runtime tool.
+2. Link a formulation CSV (and optional component CSV) as a storage asset on the session.
+3. Ask an exploratory question. The agent mounts the parent directory at `/input`, runs one script, writes Plotly HTML (and CSVs when needed), then previews and shares those files.
 
 Example prompts (documentation only; this agent does not show suggestion chips):
 
 | Prompt | Input | Expected output |
 |--------|--------|-----------------|
 | Profile my formulation dataset | formulation CSV | Column types, missingness, list-column alignment, short markdown summary |
-| Show composition for the first 20 formulations | formulation CSV | Self-contained `composition_hbar.html` (exploded IDs / Proportions) |
+| Show composition for the first 20 formulations | formulation CSV | Self-contained `/output/charts/composition_hbar.html` |
 | How does temperature relate to viscosity? | CSV with T and a viscosity column | Plotly scatter HTML plus correlation / range stats |
 | What is missing, and is this ready to model viscosity? | formulation CSV, optional component CSV | Missingness notes and readiness *advice*; no YAML and no training |
 
@@ -68,15 +68,36 @@ After a chart is shared, open the HTML file to interact with the Plotly figure.
 
 When you want a trained property model, use **NobleAI Formulation Modeling Agent** with the same files.
 
+## Tools
+
+### analytics-runtime
+
+Coding environment only. No execute actions.
+
+| Path | Role |
+|------|------|
+| `/input` | Parent directory of uploaded CSVs |
+| `/state` | Optional remount of a previous job's `/output` |
+| `/output` | Charts, CSV tables, parquet state, and logs |
+
+Helpers in the image: `parse_list_columns`, `write_plotly_html`.
+
+The generated script is run with:
+
+```text
+python3 -u "/{{scriptName}}" > {{output_directory}}/logs.out 2>&1; tail -n 100 {{output_directory}}/logs.out
+```
+
+Stdout in the agent reply is the last 100 log lines. Put results the user should keep in files under `/output`.
+
 ## Known Limitations
 
-- Charts are HTML files, not inline Plotly widgets or `{{chart_N}}` gallery tokens.
-- Plotly must be importable in the Foundry Code Interpreter sandbox. If `import plotly` fails, the agent reports that and does not fall back to PNG. Treat a missing Plotly install as a reason to add a custom coding-environment image later; this version does not add that image.
-- The Code Interpreter package set is Microsoft-managed. Helpers from Noble analytics (deterministic profiler, chart tools, memory) are not installed.
-- Code Interpreter stdout may be truncated; important results should be in files plus a short chat summary.
-- The planner should invoke only one tool at a time.
-- Human-in-the-loop (`GetUserInput`) is enabled for ambiguous questions only; there is no onboarding task picker, suggested queries, or deep-analysis questionnaire.
-- This agent does not train, sweep, or predict. List-valued composition columns are valid; do not flatten them solely to look "model-ready."
+- Charts are HTML files, not inline Plotly widgets.
+- Each coding job is a new process. Assigning a variable does not make it available on the next call. Persist Parquet and JSON under `/output/state` and remount that output at `/state`.
+- One tool call at a time. Prefer one script per question so inspect, transform, and plots do not each pay for a new job.
+- Logs returned to the agent are truncated to the last 100 lines.
+- Human-in-the-loop (`GetUserInput`) is enabled for ambiguous questions only. There is no onboarding task picker, suggested queries, or deep-analysis questionnaire.
+- This agent does not train, sweep, or predict. List-valued composition columns are valid; do not flatten them solely to look ready for modeling.
 
 ## Contributing
 

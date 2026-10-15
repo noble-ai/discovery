@@ -1,0 +1,50 @@
+name: analytics-runtime
+description: >
+  Python coding environment for formulation and tabular exploratory analysis.
+  Mount uploaded CSVs at /input and any prior job output at /state. Scripts
+  write Plotly HTML, CSV, and parquet state under /output. There are no
+  execute actions and no persistent Python kernel.
+version: 0.1.0
+category: analytics
+license: Proprietary
+
+infra:
+  - name: worker
+    infra_type: container
+    image:
+      acr: "{name}.azurecr.io/formulation-analytics:latest"
+    compute:
+      min_resources:
+        cpu: 2
+        ram: "8Gi"
+        gpu: 0
+        storage: "8Gi"
+      max_resources:
+        cpu: 4
+        ram: "16Gi"
+        gpu: 0
+        storage: "32Gi"
+      infiniband: false
+      recommended_sku:
+        - Standard_D4s_v6
+      pool_type: static
+      pool_size: 1
+
+code_environments:
+  - language: python3
+    command: "python3 -u \"/{{scriptName}}\" > {{output_directory}}/logs.out 2>&1; tail -n 100 {{output_directory}}/logs.out"
+    description: |
+      Python 3.12 environment with pandas, numpy, scipy, scikit-learn,
+      statsmodels, pyarrow, plotly, and analytics_utils.
+
+      Mounts:
+      - Uploaded CSV parent directory at /input (inputMounts mountPath /input).
+        List /input and load the real filenames. Do not use host paths.
+      - Prior coding-job output, when a follow-up needs saved tables, at /state.
+      - Job output is /output. Write charts, CSV, and state only under /output.
+        Python variables do not survive the next job.
+
+      Helpers: from analytics_utils import parse_list_columns, write_plotly_html.
+      write_plotly_html saves self-contained HTML (include_plotlyjs=True).
+      Do not train models in this environment.
+    infra_node: worker

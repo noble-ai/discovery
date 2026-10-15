@@ -1,7 +1,8 @@
 name: formulation-analytics-agent
 type: agent
-version: 0.1.0
-associated_tools: []
+version: 0.2.0
+associated_tools:
+  - agents/formulation-analytics-agent/tools/analytics-runtime
 associated_agents:
   - agents/formulation-modeling-agent
 
@@ -13,7 +14,7 @@ publisher:
 
 description: >
   Expert agent for exploring chemical formulation and tabular experimental data.
-  Uses Foundry Code Interpreter to profile CSVs, compute statistics, and write
+  A Python coding environment profiles CSVs, computes statistics, and writes
   self-contained Plotly HTML charts. Does not train models; hand off training to
   the NobleAI Formulation Modeling Agent.
 
