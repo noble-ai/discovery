@@ -456,6 +456,7 @@ def poll_operation(
     start_time = time.time()
     attempt = 0
     old_logs: list[str] = []
+    old_runtime_details = ""
     spinner = itertools.cycle(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
 
     while True:
@@ -467,6 +468,12 @@ def poll_operation(
         # Use the single-call status function
         data = get_operation_status(project_name, operation_id, workspace_url, api_version=api_version)
         debug(f"Attempt {attempt} status={data.status}")
+
+        runtime_details = data.result.runtime_details if data.result else ""
+        if runtime_details and runtime_details != old_runtime_details:
+            sys.stdout.write("\r\033[K")
+            info(f"Runtime details: {runtime_details}")
+            old_runtime_details = runtime_details
 
         logs = _extract_tool_report_logs(data.result.tool_report)  # type: ignore
         new_logs = _log_diff(old_logs, logs)
@@ -635,6 +642,11 @@ def list_operations(
     api_version: str = "2025-07-01-preview",
     *,
     page_size: int = 128,
+    status: str | None = None,
+    created_by: str | None = None,
+    created_after: str | None = None,
+    created_before: str | None = None,
+    nodepool_id: str | None = None,
 ) -> OperationsListResponse:
     """List operations for a project (single page).
 
@@ -644,6 +656,11 @@ def list_operations(
         query: Optional query parameters (e.g. {"status": "Running"})
         api_version: API version to send as query param
         page_size: Number of results per page (server default is 128)
+        status: Filter by operation status (e.g. "Running", "Succeeded", "Failed")
+        created_by: Filter by submitter UPN/email
+        created_after: Inclusive lower bound on creation timestamp (ISO-8601 UTC)
+        created_before: Exclusive upper bound on creation timestamp (ISO-8601 UTC)
+        nodepool_id: Filter by nodepool ARM resource ID
 
     Returns:
         OperationsListResponse containing list of operations and optional next link
@@ -656,6 +673,18 @@ def list_operations(
     query = {**query, "api-version": api_version}
     if "$top" not in query:
         query["$top"] = str(page_size)
+
+    # Add server-side filters when provided
+    if status:
+        query["status"] = status
+    if created_by:
+        query["createdBy"] = created_by
+    if created_after:
+        query["createdAfter"] = created_after
+    if created_before:
+        query["createdBefore"] = created_before
+    if nodepool_id:
+        query["nodepoolId"] = nodepool_id
 
     token = get_access_token()
     url = f"{workspace_url.rstrip('/')}/tools/projects/{project_name}/operations"
