@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /app /input /output /state
+RUN mkdir -p /app /inputs /output /state
 
 RUN pip install --no-cache-dir \
     numpy==1.26.4 \
@@ -16,9 +16,10 @@ RUN pip install --no-cache-dir \
     plotly==5.24.1
 
 COPY analytics_utils.py /app/analytics_utils.py
+COPY create_chart.py /app/create_chart.py
 
 WORKDIR /app
-ENV PYTHONPATH="/app:${PYTHONPATH}"
+ENV PYTHONPATH="/app"
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python3"]

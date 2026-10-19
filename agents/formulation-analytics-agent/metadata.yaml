@@ -1,6 +1,6 @@
 name: formulation-analytics-agent
 type: agent
-version: 0.2.0
+version: 0.3.0
 associated_tools:
   - agents/formulation-analytics-agent/tools/analytics-runtime
 associated_agents:
@@ -14,9 +14,9 @@ publisher:
 
 description: >
   Expert agent for exploring chemical formulation and tabular experimental data.
-  A Python coding environment profiles CSVs, computes statistics, and writes
-  self-contained Plotly HTML charts. Does not train models; hand off training to
-  the NobleAI Formulation Modeling Agent.
+  It computes statistics in a coding environment and creates Plotly HTML charts
+  with the create_chart action. Does not train models; hand off training to the
+  NobleAI Formulation Modeling Agent.
 
 tags:
   - chemistry

@@ -1,10 +1,11 @@
 name: analytics-runtime
 description: >
-  Python coding environment for formulation and tabular exploratory analysis.
-  Mount uploaded CSVs at /input and any prior job output at /state. Scripts
-  write Plotly HTML, CSV, and parquet state under /output. There are no
-  execute actions and no persistent Python kernel.
-version: 0.1.0
+  Python coding environment and create_chart action for formulation and tabular
+  exploratory analysis. Mount uploaded CSVs at /inputs and any prior job output
+  at /state. Scripts prepare chart tables, CSV, and parquet under /output.
+  The create_chart action draws charts. Scripts do not write Plotly code.
+  There is no persistent Python kernel.
+version: 0.2.0
 category: analytics
 license: Proprietary
 
@@ -12,7 +13,7 @@ infra:
   - name: worker
     infra_type: container
     image:
-      acr: "{name}.azurecr.io/formulation-analytics:latest"
+      acr: "{name}.azurecr.io/formulation-analytics:0.2.0"
     compute:
       min_resources:
         cpu: 2
@@ -30,6 +31,154 @@ infra:
       pool_type: static
       pool_size: 1
 
+actions:
+  - name: create_chart
+    description: >
+      Draw one Plotly chart and write a self-contained HTML file to
+      {output_directory}/charts/<chart_name or slug(title) or chart_type>.html
+      plus {output_directory}/chart_result.json. Prints chart_path and
+      chart_context (correlation, ranges, skew, top and bottom values, slice
+      shares) to stdout. Chart types: scatter, bar, histogram, box, pie, hbar,
+      heatmap, density_heatmap. Heatmap uses a prepared x/y/z grid;
+      density_heatmap bins raw x/y observations. Heatmap tick labels are the x
+      and y category values — keep them short (abbreviate in a coding job and
+      explain the abbreviations in the reply). Do not set width or height
+      unless the user asks for a chart size. Values are single-quoted on the
+      command line. Column names, titles, chart_name, and JSON must not contain
+      a single quote ('); rename such columns in a coding job first. JSON
+      arguments use double quotes only.
+    infra_node: worker
+    input_schema:
+      type: object
+      properties:
+        input_directory:
+          type: string
+          description: >
+            Directory that contains the chart data, or the mount used to resolve
+            a relative data_path. For a raw upload, mount the parent directory
+            at /inputs and pass /inputs. For a table prepared by a coding job,
+            remount that job output at /state and pass /state. Do not mount a
+            single file at /inputs.
+        output_directory:
+          type: string
+          description: >
+            Discovery job output mount, typically /output. The action writes
+            {output_directory}/charts/<name>.html and
+            {output_directory}/chart_result.json.
+        data_path:
+          type: string
+          description: >
+            CSV or parquet to chart. Absolute (/inputs/<file>.csv or
+            /state/data/<name>.parquet) or relative to input_directory.
+            CSV list columns are parsed. A column name that contains ' must be
+            renamed in a coding job before this action.
+        chart_type:
+          type: string
+          description: >
+            One of scatter, bar, histogram, box, pie, hbar, heatmap,
+            density_heatmap. Required arguments: scatter x+y; bar x+y;
+            histogram x; box y; pie names+values; hbar x+y; heatmap x+y+z;
+            density_heatmap x+y.
+        x:
+          type: string
+          description: >
+            Column for the x-axis. For heatmaps, values in this column are tick
+            labels; prefer concise values when long names would crowd the grid.
+            Rename the column first if the name contains '.
+        y:
+          type: string
+          description: >
+            Column for the y-axis. For heatmaps, values in this column are tick
+            labels; prefer concise values when long names would crowd the grid.
+            Rename the column first if the name contains '.
+        z:
+          type: string
+          description: >
+            Column containing values for a heatmap grid. Rename the column
+            first if the name contains '.
+        color:
+          type: string
+          description: >
+            Column to color by (scatter, bar, histogram, box, hbar). Rename the
+            column first if the name contains '.
+        title:
+          type: string
+          description: Chart title. Must not contain a single quote.
+        names:
+          type: string
+          description: >
+            Column for pie chart labels. Rename the column first if the name
+            contains '.
+        values:
+          type: string
+          description: >
+            Column for pie chart values. Rename the column first if the name
+            contains '.
+        orientation:
+          type: string
+          description: "Bar charts only: v (vertical) or h (horizontal)."
+        barmode:
+          type: string
+          description: >
+            Bar mode for bar, histogram, and hbar: group (side-by-side), stack,
+            overlay, or relative. hbar defaults to stack.
+        marginal:
+          type: string
+          description: >
+            Histogram only: marginal plot drawn above the histogram. Use box
+            unless another marginal is requested; none to omit. One of box,
+            violin, rug, histogram, none.
+        parity_line:
+          type: string
+          description: >
+            Scatter only. true draws a dashed y = x reference line (for example
+            predicted vs actual), added after layout_kwargs so it is not
+            replaced. false (default) omits it.
+        plotly_kwargs:
+          type: string
+          description: >
+            JSON object of extra keyword arguments passed to Plotly Express.
+            Examples: {"error_y": "std_col", "size": "size_col", "trendline": "ols",
+            "hover_data": ["col1", "col2"], "opacity": 0.7}. Do not set width
+            or height unless the user asks for a chart size. Double quotes
+            only; no single quotes.
+        layout_kwargs:
+          type: string
+          description: >
+            JSON object passed to Plotly fig.update_layout for fonts, axis
+            titles and ranges, legend, annotations, and shapes. Do not set
+            width or height unless the user asks for a chart size. Example:
+            {"font": {"family": "Arial", "size": 14}, "xaxis_title": "Actual",
+            "yaxis_range": [0, 1]}. Double quotes only; no single quotes.
+        chart_name:
+          type: string
+          description: >
+            File stem for the HTML chart. When omitted, the action slugs the
+            title, then falls back to chart_type. Reuse the same chart_name
+            when replacing a chart. Must not contain a single quote.
+      required:
+        - input_directory
+        - output_directory
+        - data_path
+        - chart_type
+    command: >
+      python3 /app/create_chart.py --input {{input_directory}} --output {{output_directory}}
+      --data-path '{{data_path}}' --chart-type {{chart_type}}
+      {{#if x}}--x '{{x}}'{{/if}}
+      {{#if y}}--y '{{y}}'{{/if}}
+      {{#if z}}--z '{{z}}'{{/if}}
+      {{#if color}}--color '{{color}}'{{/if}}
+      {{#if title}}--title '{{title}}'{{/if}}
+      {{#if names}}--names '{{names}}'{{/if}}
+      {{#if values}}--values '{{values}}'{{/if}}
+      {{#if orientation}}--orientation {{orientation}}{{/if}}
+      {{#if barmode}}--barmode {{barmode}}{{/if}}
+      {{#if marginal}}--marginal {{marginal}}{{/if}}
+      {{#if parity_line}}--parity-line {{parity_line}}{{/if}}
+      {{#if plotly_kwargs}}--plotly-kwargs '{{plotly_kwargs}}'{{/if}}
+      {{#if layout_kwargs}}--layout-kwargs '{{layout_kwargs}}'{{/if}}
+      {{#if chart_name}}--chart-name '{{chart_name}}'{{/if}}
+
 code_environments:
   - language: python3
     command: "python3 -u \"/{{scriptName}}\" > {{output_directory}}/logs.out 2>&1; tail -n 100 {{output_directory}}/logs.out"
@@ -38,13 +187,14 @@ code_environments:
       statsmodels, pyarrow, plotly, and analytics_utils.
 
       Mounts:
-      - Uploaded CSV parent directory at /input (inputMounts mountPath /input).
-        List /input and load the real filenames. Do not use host paths.
+      - Uploaded CSV parent directory at /inputs (inputMounts mountPath /inputs).
+        List /inputs and load the real filenames. Do not mount a single file.
+        Do not use host paths.
       - Prior coding-job output, when a follow-up needs saved tables, at /state.
-      - Job output is /output. Write charts, CSV, and state only under /output.
-        Python variables do not survive the next job.
+      - Job output is /output. Write CSV and parquet state only under /output.
+        Python variables do not survive the next job. Do not write Plotly
+        figures in scripts; the create_chart action draws charts.
 
-      Helpers: from analytics_utils import parse_list_columns, write_plotly_html.
-      write_plotly_html saves self-contained HTML (include_plotlyjs=True).
-      Do not train models in this environment.
+      Helpers: from analytics_utils import parse_list_columns.
+      Do not train models in this environment. Do not import plotly in scripts.
     infra_node: worker
